@@ -45,7 +45,7 @@ function prepareAst(src){
 function evaluateAst(tree, context){
 
   var safeFunction = FunctionFactory(context)
-  var primitives = Primitives(context)
+  var primitives = Primitives(context, safeFunction)
 
   // block scoped context for catch (ex) and 'let'
   var blockContext = context
@@ -260,7 +260,9 @@ function evaluateAst(tree, context){
           if (node.operator === 'delete' && node.argument.type === 'MemberExpression') {
             var arg = node.argument
             var parent = walk(arg.object)
-            var prop = arg.computed ? walk(arg.property) : arg.property.name
+            var prop = arg.computed ? propertyKey(walk(arg.property)) : arg.property.name
+            // stop built in objects from being able to be changed
+            if (primitives.isProtected(parent)) return false
             delete parent[prop]
             return true
           } else {
@@ -296,7 +298,7 @@ function evaluateAst(tree, context){
             return walk(arg)
           })
           var target = walk(node.callee)
-          return primitives.applyNew(target, args)
+          return checkValue(primitives.applyNew(target, args))
   
   
         case 'BinaryExpression':
@@ -331,7 +333,7 @@ function evaluateAst(tree, context){
           }
   
         case 'ThisExpression':
-          return blockContext['this']
+          return checkValue(blockContext['this'])
   
         case 'Identifier':
           if (node.name === 'undefined'){
@@ -357,9 +359,12 @@ function evaluateAst(tree, context){
         case 'MemberExpression':
           var obj = walk(node.object)
           if (node.computed){
-            var prop = walk(node.property)
+            var prop = propertyKey(walk(node.property))
           } else {
             var prop = node.property.name
+          }
+          if (prop === '__proto__' && obj != null){
+            return checkValue(primitives.getProtoProperty(obj))
           }
           obj = primitives.getPropertyObject(obj, prop)
           return checkValue(obj[prop]);
@@ -383,10 +388,7 @@ function evaluateAst(tree, context){
 
   // safely retrieve a value
   function checkValue(value){
-    if (value === Function){
-      value = safeFunction
-    }
-    return finalValue(value)
+    return finalValue(primitives.sanitize(value))
   }
 
   // block scope context control
@@ -407,7 +409,7 @@ function evaluateAst(tree, context){
       object = objectForKey(object, name, primitives)
     } else if (left.type === 'MemberExpression'){
       if (left.computed){
-        name = walk(left.property)
+        name = propertyKey(walk(left.property))
       } else {
         name = left.property.name
       }
@@ -415,7 +417,7 @@ function evaluateAst(tree, context){
     }
 
     // stop built in properties from being able to be changed
-    if (canSetProperty(object, name, primitives)){
+    if (!primitives.isProtected(object) && canSetProperty(object, name, primitives)){
       switch(operator) {
         case undefined: return object[name] = walk(right)
         case '=':  return object[name] = walk(right)
@@ -458,6 +460,11 @@ function hasProperty(object, key, primitives){
   } else {
     return hasProperty(proto, key, primitives)
   }
+}
+
+// normalize a computed property name once, so the name checked is the name used
+function propertyKey(value){
+  return typeof value === 'symbol' ? value : String(value)
 }
 
 function hasOwnProperty(object, key){
